@@ -81,8 +81,21 @@ def load_and_encode_train_data(num_queries, num_materialized_samples):
     label_norm, min_val, max_val = normalize_labels(label)
 
     # Split in training and validation samples
+    total = len(label_norm)
+    if total == 0:
+        raise ValueError("No training queries loaded from data/train.csv")
+
+    # Cap requested num_queries to what we actually have.
+    num_queries = min(int(num_queries), total)
+    if num_queries < 2:
+        raise ValueError(f"Need at least 2 queries to split train/val, got {num_queries}")
+
     num_train = int(num_queries * 0.9)
     num_test = num_queries - num_train
+    # Ensure both splits are non-empty to avoid downstream max() on empty sequences.
+    if num_test == 0:
+        num_test = 1
+        num_train = num_queries - 1
 
     samples_train = samples_enc[:num_train]
     predicates_train = predicates_enc[:num_train]
