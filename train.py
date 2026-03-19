@@ -84,7 +84,16 @@ def monotonic_regularization(mono_preds, predicate_ranges, mono_constraints, lbd
                 regs.append(0)
             else:
                 regs.append(lbda*(stable_soften_sign(pred_dist, soften) - stable_soften_sign(true_dist, soften))**2)
-    return torch.mean(torch.FloatTensor(regs))
+    if len(regs) == 0:
+        return torch.tensor(0.0)
+    # Force everything into scalar floats (mono_preds often carry shape-(1,) arrays).
+    regs_scalar = []
+    for r in regs:
+        try:
+            regs_scalar.append(float(np.asarray(r).reshape(-1)[0]))
+        except Exception:
+            regs_scalar.append(float(r))
+    return torch.mean(torch.tensor(regs_scalar, dtype=torch.float32))
 
 
 def predict(model, data_loader, cuda):
