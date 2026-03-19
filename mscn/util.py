@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from datetime import datetime
 
 
 # Helper functions for data processing
@@ -84,7 +85,21 @@ def get_min_max_vals(predicates, column_names):
 def normalize_data(val, column_name, column_min_max_vals):
     min_val = column_min_max_vals[column_name][0]
     max_val = column_min_max_vals[column_name][1]
-    val = float(val)
+    # Values may be numeric strings or SQL literals (e.g. "'1994-04-03'") for date columns.
+    if isinstance(val, str):
+        s = val.strip()
+        if (len(s) >= 2 and s[0] == "'" and s[-1] == "'"):
+            s = s[1:-1].strip()
+        # Convert YYYY-MM-DD dates to epoch seconds (our column_min_max_vals stores dates as epoch floats).
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            try:
+                val = datetime.strptime(s, "%Y-%m-%d").timestamp()
+            except Exception:
+                val = float(s)
+        else:
+            val = float(s)
+    else:
+        val = float(val)
     val_norm = 0.0
     if max_val > min_val:
         val_norm = (val - min_val) / (max_val - min_val)
