@@ -118,11 +118,13 @@ def print_qerror(preds_unnorm, labels_unnorm):
     qerror_df = list()
     qerror = []
     for i in range(len(preds_unnorm)):
-        if preds_unnorm[i] > float(labels_unnorm[i]):
-            qerror.append(preds_unnorm[i] / float(labels_unnorm[i]))
+        pred_i = float(preds_unnorm[i])
+        label_i = float(labels_unnorm[i])
+        if pred_i > label_i:
+            qerror.append(pred_i / label_i)
         else:
-            qerror.append(float(labels_unnorm[i]) / float(preds_unnorm[i]))
-        qerror_df.append({"idx": i, "pred": preds_unnorm[i], "label": float(labels_unnorm[i]), "qerror": qerror[-1]})
+            qerror.append(label_i / pred_i)
+        qerror_df.append({"idx": i, "pred": pred_i, "label": label_i, "qerror": float(qerror[-1])})
 
     print("Median: {}".format(np.median(qerror)))
     print("90th percentile: {}".format(np.percentile(qerror, 90)))
@@ -165,7 +167,7 @@ def train_and_predict(workload_name, num_queries, num_epochs, batch_size, hid_un
         print('Using lambda = {} and c = {} for monotonic regularization'.format(lbda, soften))
         monotonic_data_loader, monotonic_constraints, predicate_ranges = load_monotonic_regularization(
             table2vec, column2vec, op2vec, join2vec, min_val, max_val, column_min_max_vals,
-            num_materialized_samples, batch_size
+            num_materialized_samples, batch_size, workload_name=workload_name
         )
 
     model.train()

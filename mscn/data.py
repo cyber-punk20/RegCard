@@ -185,12 +185,30 @@ def get_train_datasets(num_queries, num_materialized_samples):
     return dicts, column_min_max_vals, min_val, max_val, labels_train, labels_test, max_num_joins, max_num_predicates, train_dataset, test_dataset
 
 
-def load_monotonic_regularization(table2vec, column2vec, op2vec, join2vec, min_val, max_val,
-        column_min_max_vals, num_materialized_samples, batch_size
-    ):
-    # subject to change
-    card_path = 'workloads/job-cmp-light-card'
-    pair_path = 'workloads/job-cmp-light-pairs.csv'
+def load_monotonic_regularization(
+    table2vec,
+    column2vec,
+    op2vec,
+    join2vec,
+    min_val,
+    max_val,
+    column_min_max_vals,
+    num_materialized_samples,
+    batch_size,
+    workload_name=None,
+):
+    """
+    Load monotonic-regularization workload and constraints.
+    Defaults to the original JOB workload if workload_name is not provided.
+    Expects:
+      - workloads/<workload>.csv and workloads/<workload>.bitmaps
+      - workloads/<workload>.cmp  (pairs in 'i>j' or 'i=j' lines)
+    """
+    # Backward-compatible default
+    if workload_name is None:
+        workload_name = "job-cmp-light-card"
+    card_path = os.path.join("workloads", workload_name)
+    cmp_path = os.path.join("workloads", workload_name + ".cmp")
 
     # load monotonic queries
     joins, predicates, tables, samples, label = load_data(card_path, num_materialized_samples)
@@ -203,7 +221,8 @@ def load_monotonic_regularization(table2vec, column2vec, op2vec, join2vec, min_v
     test_data_loader = DataLoader(test_data, batch_size=batch_size)
 
     # load monotonic constraints
-    cmp = np.array(pd.read_csv(pair_path, header=None)[0])
+    with open(cmp_path, "r") as f:
+        cmp = [line.strip() for line in f if line.strip()]
     monotonic_constraints = list()
     for cmp_str in cmp:
         if '>' in cmp_str:
@@ -213,17 +232,33 @@ def load_monotonic_regularization(table2vec, column2vec, op2vec, join2vec, min_v
             monotonic_constraints.append((left, right))
     
     # load predicate range
-    predicate_ranges = list()
-    monotonic_attribute = 't.production_year'
-    att_min, att_max = column_min_max_vals[monotonic_attribute]
+    # load predicate range for the varied attribute (for regularization distance)
+    predicate_ranges = []
     for predicate_array in predicates:
-        lower_bound, upper_bound = att_min, att_max # inclusive bounds
+        # Default: if we can't infer a range, treat as no distance.
+        found = False
+        lo = hi = 0.0
         for single_term in predicate_array:
+            if len(single_term) != 3:
+                continue
             attribute, sign, number = single_term
-            if attribute == monotonic_attribute:
+            if attribute in column_min_max_vals:
+                att_min, att_max = column_min_max_vals[attribute]
+                if not found:
+                    lo, hi = att_min, att_max
+                    found = True
+                try:
+                    num_f = float(number.strip("'")) if isinstance(number, str) else float(number)
+                except Exception:
+                    continue
                 if sign == '<':
-                    upper_bound = min(upper_bound, float(number) - 1)
-                else:  # sign == '>'
-                    lower_bound = max(lower_bound, float(number) + 1)
-        predicate_ranges.append((lower_bound, upper_bound))
+                    hi = min(hi, num_f - 1)
+                elif sign == '>':
+                    lo = max(lo, num_f + 1)
+                else:
+                    lo = max(lo, num_f)
+                    hi = min(hi, num_f)
+                # only use first matched attribute
+                break
+        predicate_ranges.append((lo, hi) if found else 0.0)
     return test_data_loader, monotonic_constraints, predicate_ranges
