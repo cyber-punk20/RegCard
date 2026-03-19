@@ -1,5 +1,6 @@
 import pickle
 import os
+import argparse
 from train import train_and_predict
 
 
@@ -32,6 +33,15 @@ def wrapper_train_and_predict(workload_name, num_queries, num_epochs, batch_size
 
 if __name__ == "__main__":
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--testset",
+        type=str,
+        default="tpch7k-cmp",
+        help="Workload name under workloads/ (expects workloads/<name>.csv/.bitmaps and optionally .cmp when --cmp is used)",
+    )
+    args = parser.parse_args()
+
     queries = 50000
     epochs = 50
     batch = 1024
@@ -43,7 +53,7 @@ if __name__ == "__main__":
     softens = [10, 100, 1000, 10000]
 
     log = 'grid_search'
-    testset = 'job-cmp-card'
+    testset = args.testset
 
     os.system('mkdir -p logs/grid_search')
 
