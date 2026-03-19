@@ -255,6 +255,8 @@ def generate_new_queries_tpch(input_path, output_path_prefix, include_passthroug
     new_rows_with_meta = []
     passthrough_rows = []
 
+    total_in = len(df)
+    progress_every = max(1, total_in // 20)  # ~5% increments
     for i in range(len(df)):
         row = df.iloc[i].to_dict()
         rows, rows_meta = generate_new_line_tpch(row, base_idx=i)
@@ -263,6 +265,11 @@ def generate_new_queries_tpch(input_path, output_path_prefix, include_passthroug
             new_rows_with_meta.extend(rows_meta)
         elif include_passthrough:
             passthrough_rows.append([row["tables"], row["joins"], row["predicates"]])
+        if (i + 1) % progress_every == 0 or (i + 1) == total_in:
+            print(
+                f"[test_gen_tpch] Expanded {i+1}/{total_in} input queries "
+                f"(variants={len(new_rows)}, passthrough={len(passthrough_rows)})"
+            )
 
     # Queries only (no cardinality column)
     out_card = str(prefix) + "-card.csv"
@@ -377,6 +384,8 @@ def main():
         kept_bitmaps = []
         kept_old_to_new = {}
         dropped = 0
+        total_gen = len(dfq)
+        progress_every = max(1, total_gen // 20)  # ~5% increments
 
         # Compute requested artifacts; always drop 0-card rows if we compute cardinality (required by mscn.data.load_data).
         for old_idx in range(len(dfq)):
@@ -413,6 +422,11 @@ def main():
             kept_rows.append([tables_str, joins_str, predicates_str, str(card)])
             if args.gen_bitmaps:
                 kept_bitmaps.append(bitmap)
+            if (old_idx + 1) % progress_every == 0 or (old_idx + 1) == total_gen:
+                print(
+                    f"[test_gen_tpch] Built {old_idx+1}/{total_gen} "
+                    f"(kept={len(kept_rows)}, dropped={dropped})"
+                )
 
         # Write workload CSV
         with open(out_csv, "w", newline="") as f:
