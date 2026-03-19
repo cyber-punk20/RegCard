@@ -200,6 +200,8 @@ def run_cardinalities(csv_path, db_user="postgres", db_host="localhost", db_port
     conn.autocommit = True
     cur = conn.cursor()
 
+    kept_rows = []
+    dropped = 0
     for i, row in enumerate(rows):
         tables, joins, predicates, _ = row[0], row[1], row[2], row[3]
         join_clause = " AND ".join(joins.split(",")) if joins else "1=1"
@@ -212,19 +214,23 @@ def run_cardinalities(csv_path, db_user="postgres", db_host="localhost", db_port
         sql = f"SELECT COUNT(*) FROM {tables} WHERE {where_clause}"
         try:
             cur.execute(sql)
-            card = cur.fetchone()[0]
+            card = int(cur.fetchone()[0])
+            if card <= 0:
+                dropped += 1
+                continue
             row[3] = str(card)
+            kept_rows.append(row)
         except Exception as e:
             print(f"Query {i} failed: {e}")
-            row[3] = "0"
+            dropped += 1
     cur.close()
     conn.close()
 
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f, delimiter="#", quoting=csv.QUOTE_NONE)
-        for r in rows:
+        for r in kept_rows:
             w.writerow(r)
-    print(f"Updated {csv_path} with cardinalities.")
+    print(f"Updated {csv_path} with cardinalities. Dropped {dropped} queries with 0 cardinality or failures; kept {len(kept_rows)}.")
 
 
 def main():

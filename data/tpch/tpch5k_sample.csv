@@ -1,0 +1,8 @@
+nation n##n.n_nationkey,=,7#
+supplier s##s.s_suppkey,>,55303#
+region r##r.r_regionkey,=,1#
+region r##r.r_regionkey,=,3#
+part p##p.p_partkey,>,110786#
+partsupp ps##ps.ps_availqty,<,1675,ps.ps_supplycost,=,380.55#
+partsupp ps##ps.ps_supplycost,>,459.97,ps.ps_availqty,=,6202#
+nation n##n.n_nationkey,>,6#
