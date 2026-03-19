@@ -50,7 +50,7 @@ if __name__ == "__main__":
     hids = [256]
     lbdas = [0, 0.1, 0.5, 1]
     dists = ['jaccard', 'diff']
-    softens = [10, 100, 1000, 10000]
+    softens = [10000, 1000, 100, 10, 1]
 
     log = 'grid_search'
     testset = args.testset
