@@ -163,10 +163,13 @@ def generate_one_query(num_predicates_min_max=(1, 4), num_tables_min_max=(1, 5),
 def generate_queries(n=5000, seed=42, out_path=None, single_table_only=True):
     random.seed(seed)
     rows = []
-    for _ in range(n):
+    progress_every = max(1, n // 10)  # ~10 updates
+    for i in range(n):
         t, j, p = generate_one_query(single_table_only=single_table_only)
         # Cardinality placeholder; will be filled by DB script
         rows.append((t, j, p, ""))
+        if (i + 1) % progress_every == 0 or (i + 1) == n:
+            print(f"[gen_tpch_queries] Generated {i+1}/{n} query templates")
     if out_path:
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -202,6 +205,8 @@ def run_cardinalities(csv_path, db_user="postgres", db_host="localhost", db_port
 
     kept_rows = []
     dropped = 0
+    total = len(rows)
+    progress_every = max(1, total // 20)  # ~5% increments
     for i, row in enumerate(rows):
         tables, joins, predicates, _ = row[0], row[1], row[2], row[3]
         join_clause = " AND ".join(joins.split(",")) if joins else "1=1"
@@ -223,6 +228,11 @@ def run_cardinalities(csv_path, db_user="postgres", db_host="localhost", db_port
         except Exception as e:
             print(f"Query {i} failed: {e}")
             dropped += 1
+        if (i + 1) % progress_every == 0 or (i + 1) == total:
+            print(
+                f"[gen_tpch_queries] Cardinalities {i+1}/{total} "
+                f"(kept={len(kept_rows)}, dropped={dropped})"
+            )
     cur.close()
     conn.close()
 
