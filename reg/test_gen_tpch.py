@@ -269,7 +269,9 @@ def generate_new_queries_tpch(input_path, output_path_prefix, include_passthroug
     out_pairs = str(prefix) + "-pairs.csv"
 
     if new_rows_with_meta:
-        new_df = pd.DataFrame(new_rows)[["tables", "joins", "predicates"]]
+        # new_rows are list rows like [tables, joins, predicates, None]
+        new_df = pd.DataFrame(new_rows, columns=["tables", "joins", "predicates", "_"])\
+            [["tables", "joins", "predicates"]]
         meta_df = pd.DataFrame(
             new_rows_with_meta,
             columns=["tables", "joins", "predicates", "base_predicates", "type", "val1", "val2", "relative_order"],
