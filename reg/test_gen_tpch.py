@@ -10,6 +10,9 @@ import re
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
+import pickle
+import csv
 
 
 # Columns we can vary for monotonicity chains: (predicate_pattern, list of values or (min, max, step))
@@ -28,6 +31,19 @@ VARYABLE_DATES = [
     ("l.l_shipdate", ["'1992-01-01'", "'1994-01-01'", "'1995-06-01'", "'1996-12-01'", "'1998-12-01'"]),
     ("l.l_commitdate", ["'1992-01-01'", "'1994-01-01'", "'1996-01-01'", "'1998-01-01'"]),
 ]
+
+# TPC-H schema: (table_name, alias)
+TPCH_TABLES = [
+    ("region", "r"),
+    ("nation", "n"),
+    ("supplier", "s"),
+    ("customer", "c"),
+    ("part", "p"),
+    ("partsupp", "ps"),
+    ("orders", "o"),
+    ("lineitem", "l"),
+]
+ALIAS_TO_TABLE = {alias: tbl for tbl, alias in TPCH_TABLES}
 
 
 def _match_predicate(parts, col_pattern):
@@ -139,6 +155,88 @@ def get_cmp(df):
     return df, cmp
 
 
+def _connect_psql(db_user="postgres", db_host="localhost", db_port="5432", db_password="", db_name="tpch"):
+    try:
+        import psycopg2
+    except ImportError as e:
+        raise ImportError("Install psycopg2: pip install psycopg2-binary") from e
+    conn = psycopg2.connect(
+        user=db_user, host=db_host, port=db_port, password=db_password or None, database=db_name
+    )
+    conn.autocommit = True
+    return conn
+
+
+def _ensure_materialized_views(cursor, num_samples=1000):
+    """Create alias_view for each TPC-H table. Drop if exists first."""
+    for table_name, alias in TPCH_TABLES:
+        view_name = f"{alias}_view"
+        cursor.execute(f"DROP MATERIALIZED VIEW IF EXISTS {view_name};")
+        cursor.execute(
+            f"CREATE MATERIALIZED VIEW {view_name} AS "
+            f"SELECT * FROM {table_name} AS {alias} ORDER BY RANDOM() LIMIT {num_samples};"
+        )
+    print("Materialized views created.")
+
+
+def _get_bitmap(tables_str, predicates_str, cursor, num_samples=1000):
+    """
+    Build packed bitmaps for the query.
+    Semantics matches scripts/gen_tpch_bitmaps_and_column_stats.py: per-table bitmap from evaluating each predicate on *_view.
+    """
+    tables = tables_str.split(",") if tables_str else []
+    table_abbrs = [t.split()[1] for t in tables if t.strip()]
+    all_bitmaps = np.zeros((len(table_abbrs), num_samples), dtype=int)
+
+    if not predicates_str or not str(predicates_str).strip():
+        return np.packbits(all_bitmaps, axis=1)
+
+    parts = str(predicates_str).split(",")
+    num_predicates = len(parts) // 3
+    for i in range(num_predicates):
+        col, op, val = parts[3 * i], parts[3 * i + 1], parts[3 * i + 2]
+        table_abbr = col.split(".")[0]
+        pred_expr = f"{col}{op}{val}"
+        view_name = f"{table_abbr}_view"
+        sql = f"SELECT CASE WHEN {pred_expr} THEN 1 ELSE 0 END AS bitmap FROM {view_name} AS {table_abbr};"
+        try:
+            cursor.execute(sql)
+            record = np.array([r[0] for r in cursor.fetchall()], dtype=int)
+            if len(record) < num_samples:
+                record = np.pad(record, (0, num_samples - len(record)), constant_values=0)
+            idx = table_abbrs.index(table_abbr)
+            all_bitmaps[idx] = record[:num_samples]
+        except Exception as e:
+            print(f"Bitmap predicate failed for {pred_expr}: {e}")
+            # leave bitmap zeros for this predicate
+            continue
+
+    return np.packbits(all_bitmaps, axis=1)
+
+
+def _get_cardinality(tables_str, joins_str, predicates_str, cursor):
+    join_clause = " AND ".join(str(joins_str).split(",")) if joins_str else "1=1"
+    pred_parts = str(predicates_str).split(",") if predicates_str else []
+    n = len(pred_parts) // 3
+    pred_clause = " AND ".join(" ".join(pred_parts[3 * k : 3 * k + 3]) for k in range(n)) if n else "1=1"
+    where_clause = f"({join_clause}) AND ({pred_clause})"
+    sql = f"SELECT COUNT(*) FROM {tables_str} WHERE {where_clause}"
+    cursor.execute(sql)
+    return int(cursor.fetchone()[0])
+
+
+def _remap_cmp_pairs(cmp_pairs, kept_old_to_new):
+    out = []
+    for s in cmp_pairs:
+        op = ">" if ">" in s else "="
+        left_s, right_s = s.split(op)
+        left = int(left_s)
+        right = int(right_s)
+        if left in kept_old_to_new and right in kept_old_to_new:
+            out.append(f"{kept_old_to_new[left]}{op}{kept_old_to_new[right]}")
+    return out
+
+
 def generate_new_queries_tpch(input_path, output_path_prefix, include_passthrough=True):
     """
     input_path: path to CSV (train format: tables#joins#predicates#cardinality)
@@ -210,6 +308,15 @@ def main():
     parser.add_argument("-f", "--file", type=str, default="data/tpch7k_final.csv", help="Input CSV (train format, # sep)")
     parser.add_argument("-o", "--output", type=str, default="data/tpch7k_final-cmp", help="Output prefix: writes {prefix}-card.csv and {prefix}-pairs.csv")
     parser.add_argument("--no-passthrough", action="store_true", help="Do not include rows without a varyable column")
+    parser.add_argument("--workload-name", type=str, default=None, help="If set, write evaluation-ready files under workloads/{name}.csv/.bitmaps/.cmp")
+    parser.add_argument("--gen-bitmaps", action="store_true", help="When used with --workload-name, generate workloads/{name}.bitmaps from PostgreSQL")
+    parser.add_argument("--gen-cardinality", action="store_true", help="When used with --workload-name, compute and write non-zero cardinalities into workloads/{name}.csv")
+    parser.add_argument("--num-materialized-samples", type=int, default=1000, help="Rows per table view for bitmaps (default: 1000)")
+    parser.add_argument("--db-user", default="postgres")
+    parser.add_argument("--db-host", default="localhost")
+    parser.add_argument("--db-port", default="5432")
+    parser.add_argument("--db-password", default="")
+    parser.add_argument("--db-name", default="tpch")
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parent.parent
@@ -220,6 +327,116 @@ def main():
         print(f"Input not found: {input_path}")
         return
     generate_new_queries_tpch(input_path, output_prefix, include_passthrough=not args.no_passthrough)
+
+    # Optional: write evaluation-ready workload under workloads/{workload_name}.*
+    if args.workload_name:
+        # Read back the just-generated -card and -pairs to avoid duplicating generation logic above.
+        card_path = Path(str(output_prefix) + "-card.csv")
+        pairs_path = Path(str(output_prefix) + "-pairs.csv")
+        if not card_path.exists():
+            print(f"Expected card file not found: {card_path}")
+            return
+
+        # Load generated queries (no cardinality)
+        dfq = pd.read_csv(card_path, sep="#", header=None, names=["tables", "joins", "predicates"])
+        cmp_pairs = []
+        if pairs_path.exists():
+            cmp_pairs = list(pd.read_csv(pairs_path, header=None)[0].astype(str).values)
+
+        workloads_dir = base / "workloads"
+        workloads_dir.mkdir(parents=True, exist_ok=True)
+        out_csv = workloads_dir / f"{args.workload_name}.csv"
+        out_bitmaps = workloads_dir / f"{args.workload_name}.bitmaps"
+        out_cmp = workloads_dir / f"{args.workload_name}.cmp"
+
+        # If generating bitmaps or cardinalities, we need DB connection and views.
+        need_db = args.gen_bitmaps or args.gen_cardinality
+        if need_db:
+            conn = _connect_psql(
+                db_user=args.db_user,
+                db_host=args.db_host,
+                db_port=args.db_port,
+                db_password=args.db_password,
+                db_name=args.db_name,
+            )
+            cur = conn.cursor()
+            try:
+                _ensure_materialized_views(cur, num_samples=args.num_materialized_samples)
+            except Exception as e:
+                print("Creating views failed:", e)
+                cur.close()
+                conn.close()
+                return
+        else:
+            conn = None
+            cur = None
+
+        kept_rows = []
+        kept_bitmaps = []
+        kept_old_to_new = {}
+        dropped = 0
+
+        # Compute requested artifacts; always drop 0-card rows if we compute cardinality (required by mscn.data.load_data).
+        for old_idx in range(len(dfq)):
+            row = dfq.iloc[old_idx]
+            tables_str = str(row["tables"])
+            joins_str = "" if pd.isna(row["joins"]) else str(row["joins"])
+            predicates_str = "" if pd.isna(row["predicates"]) else str(row["predicates"])
+
+            card = None
+            bitmap = None
+
+            try:
+                if args.gen_cardinality:
+                    card = _get_cardinality(tables_str, joins_str, predicates_str, cur)
+                    if card <= 0:
+                        dropped += 1
+                        continue
+                if args.gen_bitmaps:
+                    bitmap = _get_bitmap(tables_str, predicates_str, cur, num_samples=args.num_materialized_samples)
+            except Exception as e:
+                print(f"Failed on query {old_idx}: {e}")
+                dropped += 1
+                continue
+
+            new_idx = len(kept_rows)
+            kept_old_to_new[old_idx] = new_idx
+
+            # train.py expects 4 columns: tables#joins#predicates#cardinality, and cardinality must be non-zero.
+            if card is None:
+                # If user didn't request cardinality, we still cannot create a train.py-evaluable workload.
+                # Keep placeholder 1 to satisfy loader, but strongly recommend --gen-cardinality.
+                card = 1
+
+            kept_rows.append([tables_str, joins_str, predicates_str, str(card)])
+            if args.gen_bitmaps:
+                kept_bitmaps.append(bitmap)
+
+        # Write workload CSV
+        with open(out_csv, "w", newline="") as f:
+            w = csv.writer(f, delimiter="#", quoting=csv.QUOTE_NONE)
+            for r in kept_rows:
+                w.writerow(r)
+        print(f"Wrote {len(kept_rows)} workload rows to {out_csv} (dropped {dropped})")
+
+        # Write bitmaps if requested
+        if args.gen_bitmaps:
+            with open(out_bitmaps, "wb") as f:
+                pickle.dump(kept_bitmaps, f)
+            print(f"Wrote {len(kept_bitmaps)} bitmaps to {out_bitmaps}")
+
+        # Write cmp (remapped) if we have any pairs
+        if cmp_pairs:
+            remapped = _remap_cmp_pairs(cmp_pairs, kept_old_to_new)
+            with open(out_cmp, "w") as f:
+                for s in remapped:
+                    f.write(str(s) + "\n")
+            print(f"Wrote {len(remapped)} cmp constraints to {out_cmp}")
+
+        if cur is not None:
+            cur.close()
+        if conn is not None:
+            conn.close()
 
 
 if __name__ == "__main__":
