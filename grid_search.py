@@ -47,8 +47,8 @@ if __name__ == "__main__":
     batch = 1024
     regbatch = 1024
 
-    hids = [128, 256, 512]
-    lbdas = [0, 0.1, 0.5, 1, 3, 10]
+    hids = [256]
+    lbdas = [0, 0.1, 0.5, 1]
     dists = ['jaccard', 'diff']
     softens = [10, 100, 1000, 10000]
 
